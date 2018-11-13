@@ -28,7 +28,7 @@ def load_and_process(name):
                 ret.append(str(i)[start:stop].lower())
     return ret,labels
 
-def find_words(vect):
+def find_words(vect, voc, model):
     new_vect = []
     to_suppr = []
     for ind1,string in enumerate(vect):
@@ -52,7 +52,7 @@ def find_words(vect):
             new_vect.append(words/float(number))
         else:
             to_suppr.append(ind1)
-    return new_vect, to_suppr
+    return new_vect
 
 def make_db():
     filename = 'GoogleNews-vectors-negative300.bin'
@@ -60,7 +60,7 @@ def make_db():
     voc = list(model.wv.vocab)
 
     train, train_labels = load_and_process("train.csv")
-    train,suppr = find_words(train)
+    train,suppr = find_words(train, voc, model)
     new_label = []
     for i in range(len(train_labels)):
         if i not in suppr:
@@ -76,59 +76,202 @@ def make_db():
     file.close()
 
 def read_db():
-    db = np.zeros((19575,300))
-    labels = np.zeros((19575,),dtype='U25')
+    db = np.zeros((19365,300))
+    labels = np.zeros((19365,),dtype='U25')
     with open("new_db.csv",'r') as file:
         a = file.readlines()
-        for ind,i in enumerate(a[:19575]):
+        for ind,i in enumerate(a[:19365]):
             line = i.split(',')
             for ind2,j in enumerate(line):
                 if ind2 == 300:
-                    labels[ind] = j
+                    labels[ind] = j[:-1]
                 else:
                     db[ind,ind2] = float(j)
     return db,labels
 
 #make_db()
 db, labels = read_db()
+strings, labels_ = load_and_process("train.csv")
+strings = np.asarray(strings)[:19365]
+labels_ = np.asarray(labels_)[:19365]
+print(np.unique(labels))
+for i in range(len(labels)):
+    if labels[i] == '':
+        print(i)
 
-def crossvalFolds(global_set,labels,folds=5,argument=30):
+def private_dictionnaries(data, labels):
+    dictionnary = [[],[],[]]
+    count = [[],[],[]]
+    authors = ['HPL', 'EAP', 'MWS']
+    for ind1,string in enumerate(data):
+        words = np.zeros((300,))
+        oui = 'qwertyuiopasdfghjklzxcvbnm'
+        i = 0
+        number = 0
+        to_add = ''
+        while i != len(string):
+            if string[i] in oui:
+                to_add += string[i]
+            else:
+                if to_add != '' and to_add not in dictionnary[authors.index(labels[ind1])]:
+                    dictionnary[authors.index(labels[ind1])].append(to_add)
+                    count[authors.index(labels[ind1])].append(0)
+                elif to_add != '':
+                    count[authors.index(labels[ind1])][dictionnary[authors.index(labels[ind1])].index(to_add)] = 1
+                to_add = ''
+            i+=1
+    print("Dictonnaries computed !")
+    for i in range(3):
+        while count[i].count(0):
+            ind = count[i].index(0)
+            count[i].pop(ind)
+            dictionnary[i].pop(ind)
+    print("Dictionnaries purified")
+    to_suppr = [[],[],[]]
+    for ind,i in enumerate(dictionnary[0]):
+        found = 0
+        if i in dictionnary[1]:
+            to_suppr[1].append(dictionnary[1].index(i))
+            found = 1
+        if i in dictionnary[2]:
+            to_suppr[2].append(dictionnary[2].index(i))
+            found = 1
+        if found:
+            to_suppr[0].append(ind)
+    for ind,i in enumerate(dictionnary[1]):
+        if i in dictionnary[2] and ind not in to_suppr[1]:
+            to_suppr[2].append(dictionnary[2].index(i))
+            to_suppr[1].append(ind)
+    print("Dictionnaries analysed !")
+    for i in range(3):
+        to_suppr[i].sort()
+        for j in to_suppr[i]:
+            dictionnary[i].pop(j)
+            for k in range(len(to_suppr[i])):
+                to_suppr[i][k] -= 1
+    print("Dictionnaries pruned !")
+    return dictionnary
+
+def dictionnary_voting(dictionnary,string):
+    oui = 'qwertyuiopasdfghjklzxcvbnm'
+    i = 0
+    votes = [0,0,0]
+    to_add = ''
+    while i != len(string):
+        if string[i] in oui:
+            to_add += string[i]
+        else:
+            if to_add in dictionnary[0]:
+                votes[0]+=1
+            if to_add in dictionnary[1]:
+                votes[1]+=1
+            if to_add in dictionnary[2]:
+                votes[2]+=1
+            to_add = ''
+        i+=1
+    return votes
+
+class ensemble():
+    def __init__(self,number=100, argument=7, components = 5,use_dict = True):
+        self.number = number
+        self.argument = argument
+        self.models = []
+        self.weights = []
+        self.components = components
+        self.use_dict = use_dict
+    def fit(self,data, labels):
+        for i in range(self.number):
+            print(i)
+            choice = np.arange(300)
+            self.choice = np.random.choice(choice, 250)
+            pca = PCA(n_components=self.components)
+            ndata = pca.fit_transform(data[:,self.choice])
+            esti = tree.DecisionTreeClassifier(max_depth =self.argument)
+            esti.fit(ndata,labels)
+            self.weights.append(esti.score(ndata,labels))
+            self.models.append(esti)
+    def score(self,data,strings,labels,dictionnary):
+        prediction = []
+        score = 0
+        total = 0
+        totalvotes = 0
+        pca = PCA(n_components=self.components)
+        ndata = pca.fit_transform(data[:,self.choice])
+        for ind,sample in enumerate(ndata):
+            votes = [0,0,0]
+            authors = ['HPL','EAP','MWS']
+            for i in range(self.number):
+                predic = self.models[i].predict([sample])[0]
+                if predic in authors:
+                    votes[authors.index(predic)]+=(self.weights[i]*10)**3
+            if self.use_dict:
+                vote_mult = dictionnary_voting(dictionnary,strings[ind])
+                for i in range(3):
+                    votes[i] = votes[i]*(vote_mult[i]+1)
+            if votes != [0,0,0]:
+                if authors[votes.index(max(votes))]==labels[ind]:
+                    score += 1
+                total+=1
+        return float(score)/float(total)
+
+def crossvalFolds(global_set,labels,strings,labels_,folds=5,argument=30, components = 7, number = 10):
     foldSize = int(labels.shape[0]/folds)
     shuffler = np.arange(global_set.shape[0])
     np.random.shuffle(shuffler)
     new = global_set[shuffler,:]
     newl = labels[shuffler]
+    news = strings[shuffler]
+    newls = labels_[shuffler]
     results = []
     for i in range(folds):
         test_i = new[i*foldSize:(i+1)*foldSize,:]
         test_label_i = newl[i*foldSize:(i+1)*foldSize]
+        test_strings_i = news[i*foldSize:(i+1)*foldSize]
+        test_labels_strings_i = newls[i*foldSize:(i+1)*foldSize]
         if i == 0:
             train_i = new[(i+1)*foldSize:,:]
             train_label_i = newl[(i+1)*foldSize:]
+            train_strings_i = news[(i+1)*foldSize:]
+            train_labels_strings_i = newls[(i+1)*foldSize:]
         elif i == folds:
             train_i = new[:i*foldSize,:]
             train_label_i = newl[:i*foldSize]
+            train_strings_i = news[:i*foldSize]
+            train_labels_strings_i = newls[:i*foldSize]
         else:
             train_i = np.concatenate((new[(i+1)*foldSize:,:],new[:i*foldSize,:]))
             train_label_i = np.concatenate((newl[(i+1)*foldSize:],newl[:i*foldSize]))
-        clf = tree.DecisionTreeClassifier(max_depth =argument)
+            train_strings_i = np.concatenate((news[(i+1)*foldSize:],news[:i*foldSize]))
+            train_labels_strings_i = np.concatenate((newls[(i+1)*foldSize:],newls[:i*foldSize]))
+        #clf = tree.DecisionTreeClassifier(max_depth =argument)
+        dictionnary = private_dictionnaries(train_strings_i, train_labels_strings_i)
+        clf = ensemble(number =number, argument = argument, components = components)
         clf.fit(train_i,train_label_i)
-        results.append(clf.score(test_i,test_label_i))
+        results.append(clf.score(test_i, test_strings_i,test_label_i ,dictionnary))
         print("Progress : "+str(i+1)+"/"+str(folds)+".")
     return results
 
-def gridsearch(array):
-    accuracies = []
-    for i in array:
-        acc = crossvalFolds(db, labels, argument = i)
-        acc = sum(acc)/float(len(acc))
-        accuracies.append(acc)
-    print(accuracies)
-    print("Best accuracy : "+str(accuracies.index(max(accuracies)))+" (accuracy : "+str(max(accuracies))+").")
-    print("Achieved for max depth = "+str(array[accuracies.index(max(accuracies))]))
-    return array[accuracies.index(max(accuracies))]
+def gridsearch(array1, array2):
+    accuracies_t = []
+    for i in array1:
+        accuracies = []
+        for j in array2:
+            acc = crossvalFolds(db, labels, argument = i, components = j, number = 10)
+            acc = sum(acc)/float(len(acc))
+            accuracies.append(acc)
+        accuracies_t.append(accuracies)
+    for i in accuracies_t:
+        print(i)
+    print("Best accuracy : "+str(max([max(i) for i in accuracies_t]))+").")
+    print("Achieved for max depth = "+str(array1[accuracies_t.index(max(accuracies_t, key=lambda x:max(x)))]))
+    print("Achieved for components = "+str(array2[max(accuracies_t, key=lambda x:max(x)).index(max(max(accuracies_t, key=lambda x:max(x))))]))
+    return array1[accuracies_t.index(max(accuracies_t, key=lambda x:max(x)))],array2[max(accuracies_t, key=lambda x:max(x)).index(max(max(accuracies_t, key=lambda x:max(x))))]
 
-optimal = gridsearch([3,4,5,6,7,8,9,10,15,20,25,30,40,50,60,75,100])
+#optimal,components = gridsearch([3,4,5,6,7,8,9], [3,4,5,6,7,8,9])
+optimal = 4
+components = 3
+results = crossvalFolds(db, labels, strings, labels_, argument = optimal, components = components)
+print("Mean accuracy :"+str(sum(results)/len(results))+"%.")
 
 def analyse(optimal):
     estimator = tree.DecisionTreeClassifier(max_depth =optimal)
@@ -161,4 +304,5 @@ def analyse(optimal):
             else:
                 print(node_depth[i] * "\t"+str(feature[i])+"<="+str(threshold[i]))
 
-analyse(optimal)
+#analyse(optimal)
+
