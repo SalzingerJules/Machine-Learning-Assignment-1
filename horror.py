@@ -52,7 +52,7 @@ def find_words(vect):
             new_vect.append(words/float(number))
         else:
             to_suppr.append(ind1)
-    return new_vect
+    return new_vect, to_suppr
 
 def make_db():
     filename = 'GoogleNews-vectors-negative300.bin'
